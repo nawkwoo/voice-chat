@@ -1,0 +1,4 @@
+uvicorn
+fastapi
+TTS
+git+https://github.com/openai/whisper.git

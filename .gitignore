@@ -24,3 +24,10 @@ env/
 # OS files
 .DS_Store
 Thumbs.db
+
+# large artifacts
+*.pth
+*.pt
+*.ckpt
+*.zip
+voice-chat-be/checkpoints_v2/

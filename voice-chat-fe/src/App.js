@@ -424,25 +424,27 @@ if (typeof document !== 'undefined') {
 function App() {
   // --- React 상태(State) 및 참조(Ref) 관리 ---
 
-  // 세션 및 사용자 정보
-  const [currentUserId, setCurrentUserId] = useState(null);       // 현재 사용자의 고유 ID
-  const [currentSession, setCurrentSession] = useState(null);   // 현재 활성화된 대화 세션 정보
-  const [sessions, setSessions] = useState([]);                 // 사용자의 모든 대화 세션 목록
-  const [messages, setMessages] = useState([]);                 // 현재 세션의 메시지 목록
+  // --- 세션 및 사용자 정보 ---
+  const [currentUserId, setCurrentUserId] = useState(null);       // 현재 사용자의 고유 ID (브라우저 localStorage 기반)
+  const [currentSession, setCurrentSession] = useState(null);   // 현재 활성화된 대화 세션 정보 객체
+  const [sessions, setSessions] = useState([]);                 // 사이드바에 표시될 사용자의 모든 대화 세션 목록
+  const [messages, setMessages] = useState([]);                 // 현재 세션의 대화 메시지 목록
 
-  // UI 및 통신 상태
-  const [recording, setRecording] = useState(false);            // 음성 녹음 중인지 여부
-  const [connectionStatus, setConnectionStatus] = useState("연결중..."); // WebSocket 연결 상태
-  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false); // AI 응답 대기 중인지 여부
-  const [isPlayingTTS, setIsPlayingTTS] = useState(false);        // AI 음성(TTS) 재생 중인지 여부
+  // --- UI 및 통신 상태 ---
+  const [isRecording, setIsRecording] = useState(false);          // 음성 녹음 중인지 여부
+  const [connectionStatus, setConnectionStatus] = useState("연결중..."); // WebSocket 연결 상태 텍스트
+  const [isWaitingForResponse, setIsWaitingForResponse] = useState(false); // AI의 응답을 기다리는 중인지 여부 (STT, LLM, TTS 전체 과정)
+  const [isPlaying, setIsPlaying] = useState(false);              // AI 음성(TTS)을 재생 중인지 여부
 
-  // DOM 요소나 재렌더링에 영향을 주지 않는 값들을 저장하기 위한 Ref
-  const mediaRecorderRef = useRef(null); // MediaRecorder 인스턴스 저장
-  const audioChunksRef = useRef([]);     // 녹음된 오디오 데이터(chunk) 조각들 저장
-  const ws = useRef(null);               // WebSocket 인스턴스 저장
+  // --- 참조(Ref) ---
+  // Ref는 리렌더링을 유발하지 않으면서 컴포넌트의 생명주기 동안 값을 유지해야 할 때 사용됩니다.
+  const mediaRecorderRef = useRef(null); // MediaRecorder API의 인스턴스를 저장합니다.
+  const audioChunksRef = useRef([]);     // 녹음된 오디오 데이터(chunk) 조각들을 임시 저장하는 배열입니다.
+  const ws = useRef(null);               // WebSocket 연결 인스턴스를 저장합니다.
+  const messagesEndRef = useRef(null);   // 메시지 목록의 맨 아래를 참조하여 새 메시지 추가 시 자동으로 스크롤하기 위해 사용됩니다.
 
   /**
-   * (API 호출) 현재 사용자의 모든 세션 목록을 서버로부터 불러옵니다.
+   * (API 호출) 현재 사용자의 모든 세션 목록을 서버로부터 비동기적으로 불러옵니다.
    */
   const loadSessions = useCallback(async () => {
     if (!currentUserId) return;
@@ -459,9 +461,10 @@ function App() {
   }, [currentUserId]);
 
   /**
-   * 컴포넌트가 처음 마운트될 때 실행됩니다.
-   * - localStorage에서 사용자 ID를 가져오거나, 없으면 새로 생성하여 저장합니다.
-   * - 이를 통해 브라우저별로 고유한 사용자를 유지합니다.
+   * 컴포넌트가 처음 마운트될 때(최초 렌더링 시) 한 번만 실행되는 로직입니다.
+   * - localStorage에서 기존 사용자 ID를 가져옵니다.
+   * - ID가 없으면, 고유한 새 ID를 생성하여 localStorage에 저장합니다.
+   * - 이를 통해 사용자가 브라우저를 껐다 켜도 동일한 사용자 ID를 유지할 수 있습니다.
    */
   useEffect(() => {
     let userId = localStorage.getItem('voice_chat_user_id');
@@ -474,8 +477,8 @@ function App() {
   }, []);
 
   /**
-   * 사용자 ID(currentUserId)가 설정되면 `loadSessions`를 호출하여
-   * 해당 사용자의 세션 목록을 불러옵니다.
+   * `currentUserId` 상태가 변경될 때마다 실행됩니다.
+   * 사용자 ID가 성공적으로 설정되면, 해당 사용자의 세션 목록을 불러옵니다.
    */
   useEffect(() => {
     if (currentUserId) {
@@ -484,8 +487,17 @@ function App() {
   }, [currentUserId, loadSessions]);
 
   /**
+   * 새 메시지가 `messages` 배열에 추가될 때마다 실행됩니다.
+   * 채팅창을 맨 아래로 자동으로 스크롤하여 최신 메시지를 보여줍니다.
+   */
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+
+  /**
    * (API 호출) '새 대화' 버튼 클릭 시, 서버에 새로운 세션 생성을 요청합니다.
-   * 성공 시, 새 세션으로 UI 상태를 업데이트하고 WebSocket 연결을 시작합니다.
+   * 성공 시, 새 세션을 활성화하고 UI를 업데이트한 뒤 WebSocket 연결을 시작합니다.
    */
   const startNewChat = async () => {
     if (!currentUserId) return;
@@ -520,7 +532,7 @@ function App() {
   };
 
   /**
-   * (API 호출) 특정 세션의 모든 메시지 기록을 서버에서 불러옵니다.
+   * (API 호출) 특정 세션 ID에 해당하는 모든 메시지 기록을 서버에서 불러옵니다.
    */
   const loadSessionMessages = async (sessionId) => {
     try {
@@ -535,15 +547,19 @@ function App() {
   };
 
   /**
-   * 사용자가 사이드바에서 특정 세션을 클릭했을 때 호출됩니다.
-   * - UI 상태를 해당 세션 정보로 업데이트합니다.
-   * - 해당 세션의 메시지를 불러옵니다.
+   * 사용자가 사이드바에서 특정 세션을 클릭했을 때 호출되는 이벤트 핸들러입니다.
+   * - 현재 세션 상태를 클릭된 세션 정보로 업데이트합니다.
+   * - 해당 세션의 과거 메시지들을 불러옵니다.
    * - WebSocket 연결을 새로운 세션 ID로 다시 설정합니다.
    */
   const selectSession = (session) => {
+    // 이미 처리 중인 작업이 있을 때는 세션 변경을 방지
+    if (isRecording || isWaitingForResponse || isPlaying) return;
+
     setCurrentSession(session);
     loadSessionMessages(session.session_id);
-    
+
+    // 기존 웹소켓 연결이 있다면 종료하고 새로 연결
     if (ws.current) {
       ws.current.close();
     }
@@ -551,13 +567,15 @@ function App() {
   };
 
   /**
-   * (API 호출) 특정 세션을 삭제합니다.
+   * (API 호출) 특정 세션을 삭제하는 이벤트 핸들러입니다.
+   * @param {string} sessionId - 삭제할 세션의 ID
+   * @param {Event} event - 클릭 이벤트 객체 (이벤트 버블링 방지용)
    */
   const deleteSession = async (sessionId, event) => {
-    event.stopPropagation(); // 이벤트 버블링 방지
-    
+    event.stopPropagation(); // 부모 요소(세션 아이템)의 onClick 이벤트가 실행되지 않도록 합니다.
+
     if (!window.confirm("이 대화를 정말 삭제하시겠습니까?")) return;
-    
+
     try {
       const protocol = window.location.protocol;
       const baseUrl = `${protocol}//localhost:8000`;
@@ -575,24 +593,30 @@ function App() {
   };
 
   /**
-   * 백엔드 서버와 WebSocket 연결을 설정하고 이벤트 핸들러를 등록합니다.
+   * 백엔드 서버와 WebSocket 연결을 설정하고, 각종 이벤트에 대한 핸들러를 등록합니다.
+   * `useCallback`으로 감싸서 불필요한 재성성을 방지합니다.
+   * @param {string} user_id - 연결할 사용자의 ID
+   * @param {string} session_id - 연결할 세션의 ID
    */
   const connectWebSocket = useCallback((user_id, session_id) => {
     if (!user_id || !session_id) return;
 
-    // 기존 연결이 있다면 종료
+    // 기존 연결이 있다면 명시적으로 종료
     if (ws.current) {
         ws.current.close();
     }
-      
+
     try {
+      // 현재 페이지의 프로토콜(http/https)에 맞춰 ws/wss를 동적으로 선택합니다.
       const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-      const wsUrl = `${protocol}//localhost:8000/ws?user_id=${user_id}&session_id=${session_id}`;
-      
+      const wsUrl = `${protocol}//localhost:8000/ws/voice/${session_id}`;
+
       console.log(`[WebSocket] 연결 시도: ${wsUrl}`);
       const socket = new WebSocket(wsUrl);
-      ws.current = socket; // ref에 소켓 인스턴스 저장
-      
+      ws.current = socket; // ref에 소켓 인스턴스를 저장하여 컴포넌트 전체에서 접근 가능하게 합니다.
+
+      // --- WebSocket 이벤트 핸들러 등록 ---
+
       // 연결 성공 시
       socket.onopen = () => {
         console.log("[WebSocket] 연결이 성공적으로 수립되었습니다.");
@@ -612,121 +636,134 @@ function App() {
         setIsWaitingForResponse(false);
       };
 
-      // 서버로부터 메시지 수신 시
-      socket.onmessage = (e) => {
+      // 서버로부터 메시지 수신 시 (핵심 로직)
+      socket.onmessage = (event) => {
         try {
-          const msg = JSON.parse(e.data);
+          const msg = JSON.parse(event.data);
           console.log("[WebSocket] 메시지 수신:", msg);
 
           // 서버로부터 받은 메시지 타입에 따라 분기 처리
-          if (msg.type === "response") {
-            // AI의 최종 응답 (텍스트 + 오디오)
-            setIsWaitingForResponse(false);
-            
-            // 대화창에 사용자 입력과 AI 응답 메시지 추가
-            setMessages(prev => [...prev, 
-              { role: 'user', content: msg.user_input },
-              { role: 'assistant', content: msg.text }
-            ]);
+          switch (msg.type) {
+            // STT 결과 수신 시 (중간 결과)
+            case "stt_result":
+              // 사용자 발언을 메시지 목록에 먼저 추가하여 UI에 즉시 반영
+              setMessages(prev => [...prev, { role: 'user', content: msg.text }]);
+              break;
 
-            // Howler.js를 사용하여 수신된 TTS 오디오 재생
-            setIsPlayingTTS(true);
-            const sound = new Howl({
-              src: [`data:audio/wav;base64,${msg.audio}`],
-              format: ['wav'],
-              autoplay: true,
-              onend: () => setIsPlayingTTS(false),
-              onloaderror: () => {
-                  console.error("[Howl] TTS 오디오 재생에 실패했습니다.");
-                  setIsPlayingTTS(false);
-              }
-            });
-            sound.play();
+            // AI의 최종 음성 응답 수신 시
+            case "audio_response":
+              setIsWaitingForResponse(false);
+              // AI 응답을 메시지 목록에 추가
+              setMessages(prev => [...prev, { role: 'assistant', content: msg.text }]);
 
-          } else if (msg.type === "info" || msg.type === "error") {
-            // 정보 또는 오류 메시지 수신 시 (e.g., 음성 인식 실패)
-            alert(msg.message);
-            setIsWaitingForResponse(false);
+              // Howler.js를 사용하여 수신된 TTS 오디오 재생
+              setIsPlaying(true);
+              const sound = new Howl({
+                src: [`data:audio/wav;base64,${msg.audio_data}`],
+                format: ['wav'],
+                autoplay: true,
+                onend: () => setIsPlaying(false),
+                onloaderror: (id, err) => {
+                    console.error("[Howl] TTS 오디오 재생에 실패했습니다:", err);
+                    setIsPlaying(false);
+                }
+              });
+              sound.play();
+              break;
+
+            // 정보 또는 오류 메시지 수신 시 (e.g., 연결 성공, 음성 인식 실패)
+            case "info":
+            case "error":
+              alert(msg.message);
+              setIsWaitingForResponse(false);
+              break;
+
+            default:
+              console.warn("알 수 없는 타입의 메시지를 수신했습니다:", msg);
           }
         } catch (error) {
-          console.error("[WebSocket] 메시지 처리 중 오류 발생:", error);
+          console.error("[WebSocket] 메시지 처리 중 오류 발생:", error, "원본 데이터:", event.data);
           setIsWaitingForResponse(false);
         }
       };
-      
+
     } catch (error) {
       console.error("[WebSocket] 소켓 생성 중 오류 발생:", error);
       setConnectionStatus("연결 실패");
     }
-  }, []);
+  }, []); // 빈 배열: 이 함수는 컴포넌트가 마운트될 때 한 번만 생성됩니다.
+
 
   /**
-   * 마이크 버튼을 눌렀을 때 음성 녹음을 시작하고,
-   * 녹음이 중지되면 오디오 데이터를 WebSocket을 통해 서버로 전송합니다.
+   * 마이크 버튼을 눌렀을 때 음성 녹음을 시작하는 비동기 함수입니다.
+   * `MediaRecorder` API를 사용하여 사용자의 마이크 입력을 녹음합니다.
    */
-  const startRecord = async () => {
-    // 녹음 시작 전 조건 확인
+  const startRecording = async () => {
+    // 녹음 시작 전 현재 상태를 확인하여 중복 실행 및 오작동을 방지합니다.
     if (!ws.current || ws.current.readyState !== WebSocket.OPEN) {
       alert("서버와 연결되지 않았습니다. 새 대화를 시작해주세요.");
       return;
     }
-    if (isPlayingTTS || isWaitingForResponse || recording) return;
+    if (isPlaying || isWaitingForResponse || isRecording) return;
 
     try {
-      // 마이크 권한 요청 및 미디어 스트림 가져오기
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        audio: { // 오디오 처리 옵션
+      // 브라우저에 마이크 권한을 요청하고, 오디오 스트림을 가져옵니다.
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { // 에코 캔슬링, 노이즈 억제 등 기본 오디오 처리 옵션을 활성화합니다.
           echoCancellation: true,
           noiseSuppression: true,
           autoGainControl: true,
-        } 
+        }
       });
 
-      // MediaRecorder 설정
+      // MediaRecorder 인스턴스를 생성하고, 녹음 형식을 'audio/webm'으로 지정합니다.
       const mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
       mediaRecorderRef.current = mediaRecorder;
-      audioChunksRef.current = []; // 이전 녹음 데이터 초기화
+      audioChunksRef.current = []; // 녹음 시작 전, 이전 데이터가 남아있지 않도록 초기화합니다.
 
-      // 녹음 데이터가 들어올 때마다 chunks 배열에 추가
+      // 녹음 데이터 청크가 생성될 때마다 발생하는 이벤트입니다.
       mediaRecorder.ondataavailable = (event) => {
         if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
-      // 녹음이 중지되었을 때 실행될 로직
+      // 녹음이 중지되었을 때 최종적으로 실행되는 이벤트입니다.
       mediaRecorder.onstop = () => {
-        setRecording(false);
+        setIsRecording(false);
+        // 수집된 오디오 청크들을 하나의 Blob 객체로 합칩니다.
         const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        
-        // Blob 데이터를 Base64로 인코딩하여 서버에 전송
+
+        // Blob 데이터를 Base64 문자열로 인코딩하여 WebSocket을 통해 서버로 전송합니다.
         const reader = new FileReader();
         reader.onloadend = () => {
+          // 'data:audio/webm;base64,' 부분을 제외한 순수 Base64 데이터만 추출합니다.
           const base64data = reader.result.split(',')[1];
-          
+
           if (ws.current && ws.current.readyState === WebSocket.OPEN) {
-            ws.current.send(JSON.stringify({ 
-              type: "audio", 
-              data: base64data,
+            ws.current.send(JSON.stringify({
+              type: "audio",
+              audio_data: base64data,
             }));
-            setIsWaitingForResponse(true); // AI 응답 대기 상태로 전환
+            setIsWaitingForResponse(true); // AI 응답 대기 상태로 전환합니다.
           }
         };
         reader.readAsDataURL(audioBlob);
-        
-        // 사용이 끝난 미디어 스트림 트랙 정리
+
+        // 사용이 끝난 마이크 스트림의 모든 트랙을 중지하여 리소스를 해제합니다.
         stream.getTracks().forEach(track => track.stop());
       };
 
+      // 녹음을 시작합니다.
       mediaRecorder.start();
-      setRecording(true);
-      
-      // 3초 후 자동으로 녹음 중지 (사용자가 별도로 중지하지 않을 경우)
+      setIsRecording(true);
+
+      // 사용자가 별도로 중지하지 않을 경우를 대비해 최대 녹음 시간을 설정합니다.
       setTimeout(() => {
         if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
           mediaRecorderRef.current.stop();
         }
-      }, 9000);
+      }, 5000); // 5초 후 자동 중지
 
     } catch (err) {
       console.error("[녹음] 마이크 권한 획득 또는 녹음 시작에 실패했습니다:", err);
@@ -735,7 +772,18 @@ function App() {
   };
 
   /**
-   * 컴포넌트가 언마운트될 때 WebSocket 연결을 정리합니다.
+   * 녹음 중지 버튼 클릭 시 호출됩니다.
+   */
+  const stopRecording = () => {
+    if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+      mediaRecorderRef.current.stop();
+    }
+  };
+
+
+  /**
+   * 컴포넌트가 언마운트될 때(사라질 때) 실행되는 정리(cleanup) 함수입니다.
+   * 메모리 누수를 방지하기 위해 활성화된 WebSocket 연결을 종료합니다.
    */
   useEffect(() => {
     return () => {
@@ -745,46 +793,61 @@ function App() {
     };
   }, []);
 
-  // --- 동적 UI 렌더링을 위한 헬퍼 함수들 ---
+  // --- 동적 UI 렌더링을 위한 헬퍼(Helper) 함수들 ---
 
-  /** 현재 상태에 따라 마이크 버튼의 CSS 클래스를 반환합니다. */
+  /** 현재 상태에 따라 마이크 버튼의 아이콘을 반환합니다. */
+  const getMicIcon = () => {
+    if (isRecording) return "■"; // 중지 아이콘
+    return "🎤"; // 마이크 아이콘
+  };
+
+  /** 현재 상태에 따라 마이크 버튼의 클릭 이벤트를 결정합니다. */
+  const handleMicButtonClick = () => {
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecording();
+    }
+  };
+
+  /** 현재 상태에 따라 마이크 버튼의 CSS 클래스를 동적으로 반환합니다. */
   const getMicButtonClass = () => {
-    if (recording) return "mic-button recording";         // 녹음 중
-    if (isWaitingForResponse || isPlayingTTS) return "mic-button waiting"; // 대기 또는 재생 중
-    return "mic-button idle";                            // 유휴 상태
+    if (isRecording) return "mic-button recording";
+    if (isWaitingForResponse || isPlaying) return "mic-button waiting";
+    return "mic-button idle";
   };
 
   /** 현재 상태에 맞는 안내 텍스트를 반환합니다. */
   const getStatusText = () => {
-    if (recording) return "듣고 있는 중...";
+    if (isRecording) return "듣고 있는 중...";
     if (isWaitingForResponse) return "AI가 생각하고 있어요...";
-    if (isPlayingTTS) return "AI가 답변하고 있어요...";
+    if (isPlaying) return "AI가 답변하고 있어요...";
     if (!currentSession) return "새 대화를 시작하거나 기존 대화를 선택해주세요.";
     return "마이크 버튼을 눌러 대화를 시작하세요.";
   };
 
-  /** 현재 상태에 맞는 상태 텍스트의 색상을 반환합니다. */
+  /** 현재 상태에 맞는 상태 텍스트의 색상을 동적으로 반환합니다. */
   const getStatusColor = () => {
-    if (recording) return "#ff4757"; // 빨간색
-    if (isWaitingForResponse || isPlayingTTS) return "#ffa500"; // 주황색
-    return "#4a90e2"; // 파란색
+    if (isRecording) return "#ff4757";
+    if (isWaitingForResponse || isPlaying) return "#ffa500";
+    return "#4a90e2";
   };
 
   /** 녹음 중일 때 마이크 버튼 주위에 퍼지는 웨이브 애니메이션을 렌더링합니다. */
   const renderMicButtonWithWaves = () => {
-    const isDisabled = !ws.current || ws.current.readyState !== WebSocket.OPEN || isPlayingTTS || isWaitingForResponse;
+    const isDisabled = !currentSession || !ws.current || ws.current.readyState !== WebSocket.OPEN || isPlaying || isWaitingForResponse;
 
     const button = (
         <button
           className={getMicButtonClass()}
-          onClick={startRecord}
-          disabled={isDisabled}
+          onClick={handleMicButtonClick}
+          disabled={isDisabled && !isRecording} // 녹음 중일 때는 항상 활성화하여 중지할 수 있도록
         >
-          <div className="mic-icon">🎤</div>
+          <div className="mic-icon">{getMicIcon()}</div>
         </button>
     );
 
-    if (recording) {
+    if (isRecording) {
         return (
           <div className="wave-container">
             <div className="wave-ring wave-ring-1 pulse-animation"></div>
@@ -803,7 +866,7 @@ function App() {
       {/* 왼쪽 사이드바: 새 대화 버튼 및 세션 목록 */}
       <div className="sidebar">
         <div className="sidebar-header">
-          <button className="new-chat-btn" onClick={startNewChat} disabled={!currentUserId || isWaitingForResponse || isPlayingTTS}>
+          <button className="new-chat-btn" onClick={startNewChat} disabled={!currentUserId || isWaitingForResponse || isPlaying}>
             + 새 대화 시작하기
           </button>
         </div>
@@ -820,11 +883,11 @@ function App() {
                 className={`session-item ${currentSession?.session_id === session.session_id ? 'active' : ''}`}
                 onClick={() => selectSession(session)}
               >
-                <div className="session-title">{session.title || `대화 #${session.session_id.slice(-4)}`}</div>
+                <div className="session-title">{session.title || `대화 #${session.id}`}</div>
                 <div className="session-meta">
                   {new Date(session.created_at).toLocaleDateString()}
                 </div>
-                <button 
+                <button
                   className="delete-btn"
                   onClick={(e) => deleteSession(session.session_id, e)}
                   title="대화 삭제"
@@ -875,6 +938,8 @@ function App() {
                   </div>
                 ))
               )}
+              {/* 자동 스크롤을 위한 빈 div 요소 */}
+              <div ref={messagesEndRef} />
             </div>
 
             {/* 하단 음성 컨트롤 영역 */}

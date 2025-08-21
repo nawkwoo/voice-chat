@@ -1,5 +1,8 @@
 """
 STT (Speech-to-Text) 서비스
+
+이 모듈은 `openai-whisper` 라이브러리를 사용하여 오디오 데이터를 텍스트로 변환하는
+STT(Speech-to-Text) 기능을 제공합니다.
 """
 
 import os
@@ -18,22 +21,29 @@ logger = get_logger("stt")
 _whisper_model: Optional[whisper.Whisper] = None
 
 
-def get_whisper_model(model_name: Optional[str] = None) -> whisper.Whisper:
+def get_whisper_model(model_name: Optional[str] = None) -> Optional[whisper.Whisper]:
     """
-    OpenAI Whisper 모델을 지연 로드(lazy loading)합니다.
-    - 모델이 아직 로드되지 않은 경우(`_whisper_model` is None), `whisper.load_model`을 호출하여
-      모델을 로드하고 전역 변수 `_whisper_model`에 캐시합니다.
-    - 이미 로드된 경우, 캐시된 모델 객체를 즉시 반환합니다.
-    
+    OpenAI Whisper 모델을 지연 로드(lazy loading)하고 전역적으로 캐싱합니다.
+
+    이 함수는 실제 STT 기능이 처음 필요할 때 모델을 메모리에 로드하여
+    애플리케이션의 초기 구동 시간을 단축하고 메모리 사용을 효율화합니다.
+    한 번 로드된 모델은 전역 변수에 캐시되어 이후 요청에서는 즉시 반환됩니다.
+
+    - `settings.STT_ENABLED`가 `False`이면 모델을 로드하지 않고 `None`을 반환합니다.
+
     Args:
-        model_name (str, optional): 로드할 Whisper 모델의 이름 (예: 'base', 'small', 'medium').
-                                    기본값은 설정 파일(`settings.WHISPER_MODEL`)을 따릅니다.
-                                    
+        model_name (str, optional): 로드할 Whisper 모델의 이름 (예: 'base', 'small').
+                                    제공되지 않으면 `settings.WHISPER_MODEL` 값을 사용합니다.
+
     Returns:
-        whisper.Whisper: 로드된 Whisper 모델 객체.
+        Optional[whisper.Whisper]: 로드된 Whisper 모델 객체. 실패 또는 비활성화 시 None을 반환합니다.
     """
     global _whisper_model
-    
+
+    if not settings.STT_ENABLED:
+        logger.info("STT 기능이 비활성화되어 있어 모델을 로드하지 않습니다.")
+        return None
+
     if _whisper_model is None:
         model_name = model_name or settings.WHISPER_MODEL
         logger.info(f"🔄 Whisper STT 모델('{model_name}')의 지연 로딩을 시작합니다...")
@@ -45,36 +55,38 @@ def get_whisper_model(model_name: Optional[str] = None) -> whisper.Whisper:
         except Exception as e:
             logger.error(f"❌ Whisper STT 모델('{model_name}') 로딩 중 심각한 오류가 발생했습니다: {e}", exc_info=True)
             # 모델 로드 실패는 심각한 문제이므로 예외를 다시 발생시켜 상위 호출자에게 알립니다.
-            raise
+            raise e
     
     return _whisper_model
 
 
-def transcribe(
-    audio_path: str,
-    language: Optional[str] = 'ko'
-) -> str:
+def transcribe(audio_path_or_data: Union[str, np.ndarray], language: Optional[str] = 'ko') -> str:
     """
-    주어진 오디오 파일 경로를 읽어 텍스트로 변환(transcribe)합니다.
-    
+    주어진 오디오 파일 경로 또는 NumPy 배열 데이터를 텍스트로 변환합니다.
+
     Args:
-        audio_path (str): 변환할 오디오 파일의 경로.
+        audio_path_or_data (Union[str, np.ndarray]):
+            변환할 오디오 파일의 경로(str) 또는 로드된 오디오 데이터(NumPy 배열).
         language (str, optional): 변환할 언어의 코드 (예: 'ko', 'en'). 기본값은 'ko'.
-    
+
     Returns:
         str: 변환된 텍스트. 오류 발생 시 빈 문자열을 반환합니다.
     """
     start_time = time.time()
-    
+
     try:
         # 모델을 가져오거나 로드합니다.
         model = get_whisper_model()
-        
-        if not os.path.exists(audio_path):
-            logger.error(f"STT 변환을 위한 오디오 파일을 찾을 수 없습니다: {audio_path}")
+        if not model:
+            logger.warning("STT 모델을 사용할 수 없어 변환을 건너뜁니다.")
             return ""
 
-        result = model.transcribe(audio_path, language=language)
+        # 입력이 파일 경로일 경우, 파일 존재 여부를 확인합니다.
+        if isinstance(audio_path_or_data, str) and not os.path.exists(audio_path_or_data):
+            logger.error(f"STT 변환을 위한 오디오 파일을 찾을 수 없습니다: {audio_path_or_data}")
+            return ""
+
+        result = model.transcribe(audio_path_or_data, language=language, fp16=False)
         transcribed_text = result["text"].strip()
 
         processing_time = (time.time() - start_time) * 1000

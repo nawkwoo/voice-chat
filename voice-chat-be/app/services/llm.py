@@ -1,5 +1,8 @@
 """
 LLM (Large Language Model) 서비스
+
+이 모듈은 대규모 언어 모델을 로드하고, 주어진 텍스트(프롬프트)를 기반으로
+자연어 응답을 생성하는 기능을 제공합니다.
 """
 
 import time
@@ -20,19 +23,24 @@ _llm_model: Optional[AutoModelForCausalLM] = None
 
 def get_llm_models(model_id: Optional[str] = None) -> Tuple[Optional[AutoTokenizer], Optional[AutoModelForCausalLM]]:
     """
-    LLM 모델과 토크나이저를 지연 로드(lazy loading)합니다.
-    - `LLM_ENABLED` 설정이 `False`이면 모델을 로드하지 않습니다.
-    - 모델이 아직 로드되지 않은 경우(`_llm_model` is None), Hugging Face Hub에서 모델을 다운로드하고
-      메모리에 로드하여 전역 변수 `_tokenizer`와 `_llm_model`에 캐시합니다.
-    - 이미 로드된 경우, 캐시된 객체를 즉시 반환합니다.
-    - 사용 가능한 경우 CUDA (GPU)를 사용하고, 그렇지 않으면 CPU를 사용합니다.
-    
+    LLM 모델과 토크나이저를 지연 로드(lazy loading)하고 전역적으로 캐싱합니다.
+
+    이 함수는 애플리케이션 시작 시가 아닌, 실제 LLM 기능이 처음 필요할 때 모델을
+    메모리에 로드합니다. 이를 통해 초기 구동 시간을 단축하고 메모리를 효율적으로 사용합니다.
+    한 번 로드된 모델과 토크나이저는 전역 변수에 캐시되어 이후 요청에서는 즉시 반환됩니다.
+
+    - `settings.LLM_ENABLED`가 `False`이면 모델을 로드하지 않고 `(None, None)`을 반환합니다.
+    - `device_map="auto"` 설정을 통해 가능한 경우 GPU(CUDA)를 자동으로 사용하며,
+      GPU가 없으면 CPU를 사용합니다.
+    - Gemma 계열 모델의 경우 `torch.bfloat16` 데이터 타입을 사용하여 메모리 사용량을 최적화합니다.
+
     Args:
-        model_id (str, optional): 로드할 모델의 Hugging Face ID. 기본값은 설정 파일에 따릅니다.
-        
+        model_id (str, optional): 로드할 모델의 Hugging Face ID.
+                                    제공되지 않으면 `settings.LLM_MODEL`의 값을 사용합니다.
+
     Returns:
-        Tuple[Optional[AutoTokenizer], Optional[AutoModelForCausalLM]]: 로드된 토크나이저와 모델 객체.
-                                                                       실패 시 (None, None).
+        Tuple[Optional[AutoTokenizer], Optional[AutoModelForCausalLM]]:
+            성공 시 (토크나이저, 모델) 튜플, 실패 또는 비활성화 시 (None, None)을 반환합니다.
     """
     global _tokenizer, _llm_model
     
@@ -75,19 +83,21 @@ def get_llm_models(model_id: Optional[str] = None) -> Tuple[Optional[AutoTokeniz
 
 def generate_response(
     prompt: str,
-    max_length: int = 512,
-    temperature: float = 0.7
+    max_new_tokens: int = 512,
+    temperature: float = 0.7,
+    repetition_penalty: float = 1.2
 ) -> str:
     """
     주어진 프롬프트를 기반으로 LLM을 사용하여 텍스트 응답을 생성합니다.
-    
+
     Args:
         prompt (str): 모델에 입력될 프롬프트 텍스트.
-        max_length (int): 생성될 텍스트의 최대 길이 (토큰 기준).
+        max_new_tokens (int): 생성될 텍스트의 최대 길이 (토큰 기준).
         temperature (float): 생성의 무작위성을 조절하는 값. 낮을수록 결정론적, 높을수록 다양성이 증가합니다.
-    
+        repetition_penalty (float): 응답에서 단어 반복을 억제하는 강도. 1.0 이상으로 설정합니다.
+
     Returns:
-        str: 모델이 생성한 응답 텍스트. 오류 발생 시에는 대체 메시지를 반환합니다.
+        str: 모델이 생성한 응답 텍스트. 오류 발생 시 대체 메시지를 반환합니다.
     """
     start_time = time.time()
     
@@ -120,24 +130,22 @@ def generate_response(
         with torch.no_grad():
             outputs = model.generate(
                 **inputs,
-                max_new_tokens=max_length,      # 응답의 최대 길이 제한 (max_length -> max_new_tokens)
-                pad_token_id=tokenizer.eos_token_id  # 패딩 토큰을 문장 끝(EOS) 토큰으로 설정
+                max_new_tokens=max_new_tokens,
+                pad_token_id=tokenizer.eos_token_id,
+                temperature=temperature,
+                repetition_penalty=repetition_penalty,
+                do_sample=True,  # temperature, top_p, top_k 등의 옵션을 활성화하려면 True로 설정해야 합니다.
+                top_k=50,
+                top_p=0.95,
             )
-        
-        # 생성된 토큰 ID를 다시 텍스트로 디코딩합니다.
-        # 출력 텐서의 첫 번째 항목 전체를 디코딩합니다.
-        # skip_special_tokens=True 옵션이 특수 토큰(패딩, 문장 시작/끝 등)을 제거해줍니다.
-        response = tokenizer.decode(outputs[0], skip_special_tokens=True)
-        
-        # Gemma 모델의 경우, 응답에 입력 프롬프트가 포함되어 있을 수 있으므로 제거합니다.
-        if not "medgemma" in model.name_or_path:
-             if prompt in response:
-                response = response.replace(prompt, "").strip()
+
+        # 생성된 결과에서 입력 프롬프트 부분을 제외하고 순수한 응답만 추출합니다.
+        response = tokenizer.decode(outputs[0][input_len:], skip_special_tokens=True)
 
         processing_time = (time.time() - start_time) * 1000
         logger.info(f"✅ LLM 응답 생성 완료 ({processing_time:.2f}ms)")
-        
-        return response
+
+        return response.strip()
         
     except Exception as e:
         processing_time = (time.time() - start_time) * 1000

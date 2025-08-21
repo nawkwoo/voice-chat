@@ -11,7 +11,8 @@ FROM python:3.10-slim
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     HF_HOME=/root/.cache/huggingface \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PYTHONPATH=/app
 
 # --- 3. 작업 디렉토리 설정 ---
 # 컨테이너 내에서 명령어가 실행될 기본 경로를 /app으로 설정합니다.

@@ -1,4 +1,26 @@
+# Jupyter
 .ipynb_checkpoints/
+
+# Node.js
 node_modules/
 package-lock.json
 package.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.log
+
+# Virtual environments
+venv/
+.env/
+.venv/
+ENV/
+env/
+
+# OS files
+.DS_Store
+Thumbs.db

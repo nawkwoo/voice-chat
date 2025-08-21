@@ -1,0 +1,142 @@
+# Docker Compose 파일 버전
+version: '3.8'
+
+# --- 서비스(컨테이너) 정의 ---
+services:
+  # 1. MariaDB 데이터베이스 서비스
+  mariadb:
+    image: mariadb:10.6 # 사용할 MariaDB 이미지 버전
+    container_name: voice_chat_mariadb # 컨테이너 이름 지정
+    environment: # 컨테이너 내에서 사용할 환경 변수
+      MYSQL_ROOT_PASSWORD: "voicechat2024"
+      MYSQL_DATABASE: "voice_chat_db"
+      MYSQL_USER: "voice_chat_user"
+      MYSQL_PASSWORD: "voicechat2024"
+    ports:
+      - "3306:3306" # 호스트와 컨테이너의 포트 매핑 (호스트:컨테이너)
+    volumes:
+      # mariadb_data 라는 명명된 볼륨을 컨테이너의 /var/lib/mysql에 마운트하여 데이터 영속성 확보
+      - mariadb_data:/var/lib/mysql
+      # 호스트의 ./init-scripts 디렉토리를 컨테이너의 초기화 스크립트 경로에 마운트
+      # 컨테이너가 처음 생성될 때 이 디렉토리의 .sh, .sql, .sql.gz 파일을 자동으로 실행
+      - ./init-scripts:/docker-entrypoint-initdb.d
+    restart: unless-stopped # 컨테이너가 비정상 종료 시 자동으로 재시작 (수동으로 중지한 경우는 제외)
+    # MariaDB 서버의 기본 문자셋과 콜레이션을 UTF-8로 설정
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck: # 컨테이너의 상태를 확인하는 헬스체크 설정
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "voice_chat_user", "-pvoicechat2024"]
+      interval: 30s # 30초마다 헬스체크 실행
+      timeout: 10s # 헬스체크 명령이 10초 내에 응답해야 함
+      retries: 5 # 5번 재시도 후 실패 처리
+      start_period: 60s # 컨테이너 시작 후 60초 동안은 헬스체크 실패를 용납
+
+  # 2. Milvus 벡터 데이터베이스 서비스 군
+  # Milvus는 etcd, minio, standalone 세 개의 컴포넌트로 구성됨
+
+  # 2-1. Milvus 메타데이터 저장을 위한 etcd
+  milvus-etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.5
+    environment: # etcd 성능 및 데이터 관리를 위한 설정
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - etcd_data:/etcd # etcd 데이터 영속성을 위한 볼륨
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls http://0.0.0.0:2379 --data-dir /etcd
+    healthcheck:
+      test: ["CMD", "etcdctl", "endpoint", "health"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # 2-2. Milvus 데이터 저장을 위한 MinIO (S3 호환 오브젝트 스토리지)
+  milvus-minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+    ports:
+      - "9001:9001" # MinIO 콘솔 포트
+      - "9000:9000" # MinIO API 포트
+    volumes:
+      - minio_data:/minio_data # MinIO 데이터 영속성을 위한 볼륨
+    command: minio server /minio_data --console-address ":9001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  # 2-3. Milvus 핵심 서비스 (Standalone 모드)
+  milvus-standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.5.0
+    command: ["milvus", "run", "standalone"]
+    environment: # 의존하는 서비스들의 주소 설정
+      ETCD_ENDPOINTS: milvus-etcd:2379
+      MINIO_ADDRESS: milvus-minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus # Milvus 데이터 영속성을 위한 볼륨
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9091/healthz"]
+      interval: 30s
+      start_period: 90s # Milvus는 시작하는 데 시간이 오래 걸리므로 start_period를 길게 설정
+      timeout: 20s
+      retries: 3
+    ports:
+      - "19530:19530" # Milvus gRPC 포트
+      - "9091:9091"   # Milvus RESTful API 포트
+    depends_on: # 이 서비스가 시작되기 전에 의존하는 서비스들
+      - "milvus-etcd"
+      - "milvus-minio"
+
+  # 3. FastAPI 애플리케이션 서비스
+  fastapi:
+    build: . # 현재 디렉토리의 Dockerfile을 사용하여 이미지를 빌드
+    container_name: voice_chat_api
+    ports:
+      - "8000:8000"
+    env_file:
+        # env.docker 파일에 정의된 환경 변수들을 컨테이너 내부로 로드합니다.
+        - ./env.docker
+    environment:
+      - TZ=Asia/Seoul
+      - PYTHONIOENCODING=utf-8
+      - PYTHONPATH=/app
+      - DB_HOST=mariadb
+      - DB_PORT=3306
+      - DB_USER=voice_chat_user
+      - DB_PASSWORD=voicechat2024
+      - DB_NAME=voice_chat_db
+      - HUGGING_FACE_HUB_TOKEN=${HUGGING_FACE_HUB_TOKEN}
+    volumes:
+      # 로컬 소스 코드 실시간 동기화 라인을 주석 처리하여 이미지의 일관성을 보장합니다.
+      # 코드 수정 시 이미지를 다시 빌드해야 합니다. (docker-compose up --build -d)
+      # - .:/app
+      # 호스트의 ./certs 디렉토리를 컨테이너의 /certs에 마운트하여 SSL 인증서 전달
+      - ./certs:/certs
+      # 처리된 파일을 저장할 디렉토리 마운트 (예: 임시 오디오 파일)
+      - ./processed:/app/processed
+      # Hugging Face 모델 캐시를 볼륨으로 마운트하여 컨테이너가 재시작되어도 캐시 유지
+      - hf_cache:/root/.cache/huggingface
+      # 모델 체크포인트 디렉토리를 마운트하여 이미지에 포함시키지 않고 외부에서 관리
+      - ./checkpoints_v2:/app/checkpoints_v2
+    depends_on: # 의존성 설정
+      mariadb:
+        condition: service_healthy # mariadb 서비스가 'healthy' 상태가 된 후에 fastapi 시작
+      milvus-standalone:
+        condition: service_healthy # milvus-standalone 서비스가 'healthy' 상태가 된 후에 fastapi 시작
+    restart: unless-stopped
+
+# --- 명명된 볼륨(Named Volumes) 정의 ---
+# Docker가 볼륨의 실제 저장 위치를 관리하므로 경로를 직접 신경 쓸 필요가 없음
+# 컨테이너를 삭제해도 데이터가 보존됨
+volumes:
+  mariadb_data:
+  etcd_data:
+  minio_data:
+  milvus_data:
+  hf_cache:

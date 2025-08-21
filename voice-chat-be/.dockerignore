@@ -1,0 +1,27 @@
+# Docker 빌드 시 제외할 파일 및 디렉토리 목록
+
+# Git 관련 파일
+.git
+.gitignore
+
+# Python 가상 환경 및 캐시
+venv/
+__pycache__/
+*.pyc
+
+# 대용량 모델 체크포인트 및 데이터
+# 이 디렉토리들은 docker-compose.yml에서 볼륨으로 마운트되므로 이미지에 포함될 필요가 없습니다.
+checkpoints_v2/
+checkpoints_v2_0417.zip
+processed/
+RealTime_zeroshot_TTS_ko/checkpoints_v2/
+RealTime_zeroshot_TTS_ko/checkpoints_v2_0417.zip
+RealTime_zeroshot_TTS_ko/processed/
+
+# 환경 변수 파일
+.env
+env.docker
+
+# 기타 불필요한 파일
+*.ipynb
+.hf_cache/
